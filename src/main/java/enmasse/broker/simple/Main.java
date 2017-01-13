@@ -9,7 +9,7 @@ import java.io.IOException;
 class Main {
     public static void main(String args[]) throws IOException {
         String routerHost = System.getenv("MESSAGING_SERVICE_HOST");
-        int routerPort = Integer.parseInt(System.getenv("MESSAGING_SERVICE_PORT"));
+        int routerPort = Integer.parseInt(System.getenv("MESSAGING_SERVICE_PORT_INTERNAL"));
         String queueName = System.getenv("QUEUE_NAME");
         String containerId = System.getenv("CONTAINER_ID");
         Broker broker = new Broker(containerId, routerHost, routerPort, new Queue(queueName, 1000));
