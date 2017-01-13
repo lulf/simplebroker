@@ -3,18 +3,17 @@ package enmasse.broker.simple;
 import org.apache.qpid.proton.amqp.messaging.*;
 import org.apache.qpid.proton.amqp.transport.ReceiverSettleMode;
 import org.apache.qpid.proton.amqp.transport.SenderSettleMode;
-import org.apache.qpid.proton.engine.BaseHandler;
-import org.apache.qpid.proton.engine.Delivery;
-import org.apache.qpid.proton.engine.Event;
-import org.apache.qpid.proton.engine.Receiver;
+import org.apache.qpid.proton.engine.*;
 import org.apache.qpid.proton.message.Message;
 import org.apache.qpid.proton.message.impl.MessageImpl;
 import org.apache.qpid.proton.reactor.FlowController;
 import org.apache.qpid.proton.reactor.Handshaker;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
+import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class Broker extends BaseHandler {
     private final String routerHost;
@@ -22,7 +21,8 @@ public class Broker extends BaseHandler {
     private final String containerId;
     private final Queue queue;
     private int nextTag = 0;
-    private final Set<byte[]> unsettled = new ConcurrentSkipListSet<>();
+    private final Set<ByteBuffer> unsettled = new HashSet<>();
+    private AtomicReference<Sender> sender = new AtomicReference<>();
 
     public Broker(String containerId, String routerHost, int routerPort, Queue queue) {
         this.containerId = containerId;
@@ -50,13 +50,14 @@ public class Broker extends BaseHandler {
             startReceiver(e.getReceiver());
         } else if (e.getSender() != null) {
             startSender(e.getSender());
+            sender.set(e.getSender());
         }
     }
 
     @Override
     public void onDelivery(Event e) {
         Delivery delivery = e.getDelivery();
-        if (delivery != null && unsettled.remove(delivery.getTag())) {
+        if (delivery != null && unsettled.remove(ByteBuffer.wrap(delivery.getTag()))) {
             delivery.settle();
         } else {
             Receiver receiver = e.getReceiver();
@@ -84,32 +85,34 @@ public class Broker extends BaseHandler {
     public void onLinkFlow(Event e) {
         org.apache.qpid.proton.engine.Sender snd = e.getSender();
         if (snd.getCredit() > 0) {
-            Section section = queue.dequeue();
-            if (section == null) {
-                System.err.println("Not messages when onLinkFlow");
-                return;
-            }
-            Message message = Message.Factory.create();
-            message.setBody(section);
-            message.setAddress(queue.getAddress());
-
-            byte[] tag = String.valueOf(nextTag++).getBytes(Charset.forName("UTF-8"));
-            Delivery dlv = snd.delivery(tag);
-            unsettled.add(dlv.getTag());
-
-            byte[] encodedMessage = new byte[1024];
-            MessageImpl msg = (MessageImpl) message;
-            int len = msg.encode2(encodedMessage, 0, encodedMessage.length);
-
-            if (len > encodedMessage.length) {
-                encodedMessage = new byte[len];
-                msg.encode(encodedMessage, 0, len);
-            }
-            snd.send(encodedMessage, 0, len);
-            snd.advance();
+            sendData(snd);
         }
     }
 
+    private void sendData(Sender snd) {
+        Section section = queue.dequeue();
+        if (section == null) {
+            return;
+        }
+        Message message = Message.Factory.create();
+        message.setBody(section);
+        message.setAddress(queue.getAddress());
+
+        byte[] tag = String.valueOf(nextTag++).getBytes(Charset.forName("UTF-8"));
+        Delivery dlv = snd.delivery(tag);
+        unsettled.add(ByteBuffer.wrap(dlv.getTag()));
+
+        byte[] encodedMessage = new byte[1024];
+        MessageImpl msg = (MessageImpl) message;
+        int len = msg.encode2(encodedMessage, 0, encodedMessage.length);
+
+        if (len > encodedMessage.length) {
+            encodedMessage = new byte[len];
+            msg.encode(encodedMessage, 0, len);
+        }
+        snd.send(encodedMessage, 0, len);
+        snd.advance();
+    }
 
     private void startReceiver(org.apache.qpid.proton.engine.Receiver receiver) {
         Target target = new Target();
@@ -126,6 +129,13 @@ public class Broker extends BaseHandler {
         sender.setSenderSettleMode(SenderSettleMode.MIXED);
         sender.setReceiverSettleMode(ReceiverSettleMode.FIRST);
         sender.setSource(source);
+    }
+
+    @Override
+    public void onUnhandled(Event e) {
+        if (sender.get() != null && sender.get().getCredit() > 0) {
+            sendData(sender.get());
+        }
     }
 
 }
